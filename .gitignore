@@ -1,0 +1,14 @@
+# ignore .txt files
+*.txt
+*.json
+*.yaml
+
+# ignore IDE settings
+.vscode
+.build
+
+# ignore library directory
+lib
+
+# ignore raw (or experimental) data
+with_inspector.go
