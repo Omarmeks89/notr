@@ -1,13 +1,13 @@
 package notr
 
 import (
-	"container/list"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"math"
 	"reflect"
 	"slices"
+	"sync"
 
 	"github.com/pkg/errors"
 	"golang.org/x/tools/go/analysis"
@@ -18,9 +18,11 @@ import (
 const (
 	linterName = "notr"
 
-	defaultScopesCount  = 64
 	defaultAliasesCount = 8
+	defaultScopesCount  = 64
+)
 
+const (
 	fnCallInArgs opTyp = iota
 	fnCallInBinOp
 )
@@ -59,18 +61,49 @@ type (
 	}
 )
 
+type scopesMap struct {
+	m      *sync.RWMutex
+	scopes map[int]*funcScope
+}
+
+func (m *scopesMap) GetScope(key int) (*funcScope, bool) {
+	m.m.RLock()
+	scope, ok := m.scopes[key]
+	m.m.RUnlock()
+
+	return scope, ok
+}
+
+func (m *scopesMap) AddScope(key int, scope *funcScope) {
+	m.m.RLock()
+	_, ok := m.scopes[key]
+	m.m.RUnlock()
+
+	if ok {
+		return
+	}
+
+	m.m.Lock()
+	defer m.m.Unlock()
+
+	m.scopes[key] = scope
+}
+
 // linter is a linter type
 type linter struct {
-	calls  *list.List         // deque of steps
-	scopes map[int]*funcScope // function scope to localize calls
+	calls  []callContext // deque of steps
+	scopes scopesMap     // function scope to localize calls
 	opNo   int
 }
 
 func NewLinter() *linter {
 	return &linter{
-		calls:  list.New(),
-		scopes: make(map[int]*funcScope, defaultScopesCount),
-		opNo:   0,
+		calls: make([]callContext, 0),
+		scopes: scopesMap{
+			m:      &sync.RWMutex{},
+			scopes: make(map[int]*funcScope, defaultScopesCount),
+		},
+		opNo: 0,
 	}
 }
 
@@ -165,14 +198,17 @@ func (lr *linter) handleFuncDeclaration(decl *ast.FuncDecl, scope int) error {
 		return nil
 	}
 
-	for _, field := range decl.Recv.List {
-		if len(field.Names) == 0 {
-			return errors.Errorf("no field names found in node.Recv.List: %+v", decl.Recv.List)
-		}
-
-		methodName := field.Names[0].Name + "." + decl.Name.Name
-		lr.registerFunc(scope, methodName)
+	if len(decl.Recv.List) == 0 {
+		return errors.Errorf("symbol has no reseivers: %q", decl.Name.Name)
 	}
+
+	field := decl.Recv.List[0]
+	methodName := decl.Name.Name
+	if len(field.Names) != 0 {
+		methodName = field.Names[0].Name + "." + decl.Name.Name
+	}
+
+	lr.registerFunc(scope, methodName)
 
 	return nil
 }
@@ -180,6 +216,12 @@ func (lr *linter) handleFuncDeclaration(decl *ast.FuncDecl, scope int) error {
 func (lr *linter) handleAssignmentExpression(c inspector.Cursor, scope int) error {
 	if err := lr.incOp(); err != nil {
 		errors.Wrap(err, "too many operations")
+	}
+
+	// Get function scope. It have to be created at the moment
+	functionScope, ok := lr.scopes.GetScope(scope)
+	if !ok {
+		return errors.New("function scope does not exists")
 	}
 
 	assignment, _ := c.Node().(*ast.AssignStmt)
@@ -201,7 +243,11 @@ func (lr *linter) handleAssignmentExpression(c inspector.Cursor, scope int) erro
 
 		if okIdentLeft && okIdentRight {
 			// we have both Idents so we have to register them and continue.
-			lr.registerAlias(scope, identRight.Name, identLeft.Name)
+			//
+			// compare RHS.Name with function name - optimize memory usage.
+			if lr.needRegisterAlias(functionScope, identRight.Name) {
+				lr.registerAlias(scope, identRight.Name, identLeft.Name)
+			}
 
 			continue
 		}
@@ -217,10 +263,18 @@ func (lr *linter) handleAssignmentExpression(c inspector.Cursor, scope int) erro
 			return err
 		}
 
-		lr.registerAlias(scope, methodName, identLeft.Name)
+		if lr.needRegisterAlias(functionScope, methodName) {
+			lr.registerAlias(scope, methodName, identLeft.Name)
+		}
 	}
 
 	return nil
+}
+
+func (lr *linter) needRegisterAlias(functionScope *funcScope, rhsName string) bool {
+	namesEqual := functionScope.name == rhsName
+	_, aliasExists := functionScope.aliases[rhsName]
+	return namesEqual || aliasExists
 }
 
 func (lr *linter) getFullSelectorName(s *ast.SelectorExpr) (string, error) {
@@ -256,20 +310,18 @@ func (lr *linter) incOp() error {
 }
 
 func (lr *linter) registerFunc(scope int, fName string) {
-	if _, ok := lr.scopes[scope]; ok {
-		return
-	}
-
-	lr.scopes[scope] = &funcScope{
+	fs := &funcScope{
 		name:    fName,
 		aliases: make(map[string]map[string]struct{}, defaultAliasesCount),
 	}
+
+	lr.scopes.AddScope(scope, fs)
 }
 
 // registerAlias сохраняет имя символа слева и имя символа справа, рассматривая их
 // как потенциальные имена и псевдонимы функций.
 func (lr *linter) registerAlias(scope int, fName, alias string) {
-	fs, ok := lr.scopes[scope]
+	fs, ok := lr.scopes.GetScope(scope)
 	if !ok {
 		return
 	}
@@ -298,36 +350,24 @@ func (lr *linter) registerCall(scope int, op opTyp, call *ast.CallExpr) {
 	}
 
 	step := callContext{
-		opNo:             lr.opNo, // 32bits
-		opType:           op,      // 4bit
-		scope:            scope,   // 20bit
+		opNo:             lr.opNo,
+		opType:           op,
+		scope:            scope,
 		boundedFuncAlias: funcName,
 		start:            int(call.Pos()),
 		end:              int(call.End()),
 	}
 
-	lr.calls.PushBack(step)
+	lr.calls = append(lr.calls, step)
 }
 
 func (lr *linter) analyzeCalls() ([]report, error) {
-	var (
-		r       *report
-		callCtx callContext
-		ok      bool
-	)
+	var r *report
 
 	reports := make(map[int]*report)
 
-	for lr.calls.Len() != 0 {
-		call := lr.calls.Front()
-		lr.calls.Remove(call)
-
-		callCtx, ok = call.Value.(callContext)
-		if !ok {
-			return nil, errors.New("call structure is not a 'callContext'")
-		}
-
-		funcScope, ok := lr.scopes[callCtx.scope]
+	for _, callCtx := range lr.calls {
+		funcScope, ok := lr.scopes.GetScope(callCtx.scope)
 		if !ok {
 			continue
 		}

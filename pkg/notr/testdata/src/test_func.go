@@ -38,3 +38,10 @@ func (t T) B(i int) int {
 func A(i int) int {
 	return i + 1
 }
+
+type VT struct{}
+
+// no receiver name
+func (*VT) X() {
+	x := X
+}
