@@ -42,6 +42,8 @@ func A(i int) int {
 type VT struct{}
 
 // no receiver name
-func (*VT) X() {
-	x := X
+func (*VT) X() int {
+	vt := &VT{}
+	x := vt.X
+	return x() + x() // not a recursion call
 }

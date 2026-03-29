@@ -30,6 +30,7 @@ const (
 var (
 	ErrTooManyOperations = errors.New("too many operations")
 	ErrNoIdent           = errors.New("selector.X is not an *ast.Ident node")
+	ErrNoReceiver        = errors.New("recursion call impossible: no receiver")
 )
 
 // funcScope представление области видимости функции для
@@ -89,7 +90,6 @@ func (m *scopesMap) AddScope(key int, scope *funcScope) {
 	m.scopes[key] = scope
 }
 
-// linter is a linter type
 type linter struct {
 	calls  []callContext // deque of steps
 	scopes scopesMap     // function scope to localize calls
@@ -123,15 +123,9 @@ func NewAnalyzer() *analysis.Analyzer {
 func (lr *linter) run(p *analysis.Pass) (any, error) {
 	wishedNodes := []ast.Node{&ast.FuncDecl{}}
 	astCursor := p.ResultOf[inspect.Analyzer].(*inspector.Inspector).Root()
-
-	// inspect AST using Cursor
 	astCursor.Inspect(wishedNodes, lr.inspectAst)
 
-	reports, err := lr.analyzeCalls()
-	if err != nil {
-		return false, errors.Wrap(err, "analyze calls")
-	}
-
+	reports := lr.analyzeCalls()
 	slices.SortStableFunc(reports, func(a report, b report) int {
 		return a.opNo - b.opNo
 	})
@@ -153,19 +147,24 @@ func (lr *linter) report(p *analysis.Pass, reports []report) {
 }
 
 func (lr *linter) inspectAst(c inspector.Cursor) bool {
+	var errMsgHeader = "inspectAst"
+
 	switch nodeType := c.Node().(type) {
 	case *ast.FuncDecl:
 		scopeNo := lr.opNo
 
 		if err := lr.handleFuncDeclaration(nodeType, scopeNo); err != nil {
-			panic(err)
+			if errors.Is(err, ErrNoReceiver) {
+				return false
+			}
+
+			panic(errors.Errorf("%s: node %q: %v", errMsgHeader, nodeType.Name.Name, err))
 		}
 
-		// handle assignment expression
 		for cursor := range c.Preorder(&ast.AssignStmt{}) {
 			if err := lr.handleAssignmentExpression(cursor, scopeNo); err != nil {
 				if !errors.Is(err, ErrNoIdent) {
-					panic(err)
+					panic(errors.Errorf("%s: %v", errMsgHeader, err))
 				}
 			}
 		}
@@ -173,18 +172,18 @@ func (lr *linter) inspectAst(c inspector.Cursor) bool {
 		// try to fetch like a(a(1)) - a(a(a(-2)))
 		for cursor := range c.Preorder(&ast.BinaryExpr{}) {
 			if err := lr.preorderNestedCall(cursor, scopeNo, fnCallInBinOp); err != nil {
-				panic(err)
+				panic(errors.Errorf("%s: %v", errMsgHeader, err))
 			}
 		}
 
 		for cursor := range c.Preorder(&ast.CallExpr{}) {
 			if err := lr.preorderNestedCall(cursor, scopeNo, fnCallInArgs); err != nil {
-				panic(err)
+				panic(errors.Errorf("%s: %v", errMsgHeader, err))
 			}
 		}
 
 		if err := lr.incOp(); err != nil {
-			panic(err)
+			panic(errors.Errorf("%s: %v", errMsgHeader, err))
 		}
 	}
 
@@ -198,30 +197,35 @@ func (lr *linter) handleFuncDeclaration(decl *ast.FuncDecl, scope int) error {
 		return nil
 	}
 
-	if len(decl.Recv.List) == 0 {
-		return errors.Errorf("symbol has no reseivers: %q", decl.Name.Name)
+	if decl.Recv.List == nil {
+		return errors.Errorf("handle func declaration: symbol %q has no receiver field", decl.Name.Name)
 	}
+
+	err := ErrNoReceiver
 
 	field := decl.Recv.List[0]
-	methodName := decl.Name.Name
 	if len(field.Names) != 0 {
-		methodName = field.Names[0].Name + "." + decl.Name.Name
+		methodName := field.Names[0].Name + "." + decl.Name.Name
+		lr.registerFunc(scope, methodName)
+		err = nil
 	}
 
-	lr.registerFunc(scope, methodName)
-
-	return nil
+	// we may have method declaration like:
+	//		func (*structName) X() any {}
+	//
+	// there is no receiver, so we can't make a recursion call.
+	return err
 }
 
 func (lr *linter) handleAssignmentExpression(c inspector.Cursor, scope int) error {
 	if err := lr.incOp(); err != nil {
-		errors.Wrap(err, "too many operations")
+		errors.Wrap(err, "handle assignment: too many operations")
 	}
 
 	// Get function scope. It have to be created at the moment
 	functionScope, ok := lr.scopes.GetScope(scope)
 	if !ok {
-		return errors.New("function scope does not exists")
+		return errors.New("handle assignment: function scope does not exists")
 	}
 
 	assignment, _ := c.Node().(*ast.AssignStmt)
@@ -280,7 +284,7 @@ func (lr *linter) needRegisterAlias(functionScope *funcScope, rhsName string) bo
 func (lr *linter) getFullSelectorName(s *ast.SelectorExpr) (string, error) {
 	receiverIdent, ok := s.X.(*ast.Ident)
 	if !ok {
-		return "", errors.Wrapf(ErrNoIdent, "skip unsupported selector 'X' type: %T", s.X)
+		return "", errors.Wrapf(ErrNoIdent, "get full selector name: skip unsupported selector 'X' type: %T", s.X)
 	}
 
 	return receiverIdent.Name + "." + s.Sel.Name, nil
@@ -288,7 +292,7 @@ func (lr *linter) getFullSelectorName(s *ast.SelectorExpr) (string, error) {
 
 func (lr *linter) preorderNestedCall(c inspector.Cursor, scope int, opType opTyp) error {
 	if err := lr.incOp(); err != nil {
-		return errors.Wrap(err, "too many operations")
+		return errors.Wrap(err, "preorder nested call: too many operations")
 	}
 
 	for call := range c.Preorder(&ast.CallExpr{}) {
@@ -301,7 +305,7 @@ func (lr *linter) preorderNestedCall(c inspector.Cursor, scope int, opType opTyp
 
 func (lr *linter) incOp() error {
 	if lr.opNo == math.MaxInt64 {
-		return errors.Errorf("operations limit exeed: %d", math.MaxInt64)
+		return errors.Errorf("increment operation: operations limit exeed: %d", math.MaxInt64)
 	}
 
 	lr.opNo++
@@ -361,11 +365,10 @@ func (lr *linter) registerCall(scope int, op opTyp, call *ast.CallExpr) {
 	lr.calls = append(lr.calls, step)
 }
 
-func (lr *linter) analyzeCalls() ([]report, error) {
+func (lr *linter) analyzeCalls() []report {
 	var r *report
 
 	reports := make(map[int]*report)
-
 	for _, callCtx := range lr.calls {
 		funcScope, ok := lr.scopes.GetScope(callCtx.scope)
 		if !ok {
@@ -409,5 +412,5 @@ func (lr *linter) analyzeCalls() ([]report, error) {
 		}
 	}
 
-	return result, nil
+	return result
 }
