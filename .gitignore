@@ -12,3 +12,9 @@ lib
 
 # ignore raw (or experimental) data
 with_inspector.go
+
+# manuals
+*.md
+
+# exclude
+!README.*

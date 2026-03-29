@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/Omarmeks89/notr/pkg/notr"
-
 	"golang.org/x/tools/go/analysis"
 )
 
@@ -23,7 +22,7 @@ func New(conf any) ([]*analysis.Analyzer, error) {
 		if !ok {
 			return analyzers, errors.New("conf must be a map[string]interface{}")
 		}
-		for k, _ := range linters {
+		for k := range linters {
 			value, ok := confMap[k]
 			if !ok {
 				analyzers = append(analyzers, linters[k])
