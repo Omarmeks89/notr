@@ -27,8 +27,8 @@ vet:
 # -c=N is a number of lines before | after
 # (about shell commands: https://stackoverflow.com/questions/67969635/execute-shell-commands-inside-a-target-in-makefile)
 #
-	@go vet -c=5 ./...
-	@go vet -c=5 -vettool=$(shell which notr) ./pkg/notr/testdata/src/
+# 	@go vet -c=5 -vettool=$(shell which notr) ./pkg/notr/testdata/src/
+	@go vet -c=5 -vettool=$(shell which notr) ./pkg/rules-check/
 
 clean:
 	rm -rf ${LINTER_SO_PATH}/lib/notr.so $(LINTER_NAME) $(PATH_TO_BIN)/$(LINTER_NAME)

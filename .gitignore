@@ -9,6 +9,7 @@
 
 # ignore library directory
 lib
+ruleguard
 
 # ignore raw (or experimental) data
 with_inspector.go

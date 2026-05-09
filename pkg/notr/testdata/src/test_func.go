@@ -22,6 +22,19 @@ func complexFunc(i, j int) int {
 	return cf(cf(i-1, j), cf(k, n-1)) // want "tree recursion in call 'complexFunc'"
 }
 
+func complexFunc2(i, j int) int {
+	var fnc func(i, j int) int
+
+	if i <= 0 || j <= 0 {
+		return i - j
+	}
+
+	k, n := i, j
+	fnc, n = complexFunc2, j
+
+	return fnc(fnc(i-1, j), fnc(k, n-1)) // want "tree recursion in call 'complexFunc2'"
+}
+
 type T struct{}
 
 func (t T) A(i int) int {
