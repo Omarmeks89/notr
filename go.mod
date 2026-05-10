@@ -1,6 +1,6 @@
 module github.com/Omarmeks89/notr
 
-go 1.25.5
+go 1.26.3
 
 require (
 	github.com/pkg/errors v0.9.1

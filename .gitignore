@@ -2,6 +2,7 @@
 *.txt
 *.json
 *.yaml
+*.yml
 
 # ignore IDE settings
 .vscode
@@ -16,6 +17,12 @@ with_inspector.go
 
 # manuals
 *.md
+
+# archives
+*.zip
+*.tar
+*.gz
+*.gzip
 
 # exclude
 !README.*
